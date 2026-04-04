@@ -122,9 +122,9 @@ Create a new conda environment and install the dependencies. We recommend Python
 ```sh
 conda create -n gr00t python=3.10
 conda activate gr00t
-pip install --upgrade setuptools
+pip install "setuptools<81"
 pip install -e .[base]
-pip install --no-build-isolation flash-attn==2.7.1.post4 
+pip install --no-build-isolation --no-cache-dir flash-attn==2.7.1.post4 
 ```
 
 ## Getting started with this repo
@@ -391,14 +391,9 @@ The SO-101 demo has been tested on an RTX Pro 6000 Workstation Edition GPU.
 
 Ensure you have the correct version of `torchcodec` installed. This also requires the correct version of `ffmpeg` installed. For more info, check out the [torchcodec documentation](https://github.com/pytorch/torchcodec).
 
-we tested it with `ffmpeg` version 7.0.1
+We tested it with `ffmpeg` version 7.1.1
 ```bash
-sudo apt-get update
-sudo apt-get install -y software-properties-common
-sudo add-apt-repository -y ppa:ubuntuhandbook1/ffmpeg7
-sudo apt-get update
-sudo apt-get install -y ffmpeg
-ffmpeg -version
+conda install ffmpeg=7.1.1 -c conda-forge
 ```
 
 If you encounter `ValueError: No valid stream found in input file.`, this requires you to use the correct version of `ffmpeg` and `torchcodec`.

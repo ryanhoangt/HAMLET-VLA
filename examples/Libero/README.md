@@ -128,3 +128,5 @@ python scripts/gr00t_finetune.py \
     --max-steps 60000
 ```
 > Note, replace with the corresponding data config class and training configs according to the [table](#training-config-table).
+> 
+> If you face issues related to W&B connection, try `export WANDB_DISABLE_SERVICE=true`. 

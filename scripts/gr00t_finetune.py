@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import List, Literal
 
 import torch
+# torch.multiprocessing.set_sharing_strategy('file_system')
 import tyro
 from transformers import TrainingArguments
 
@@ -355,7 +356,7 @@ def main(config: ArgsConfig):
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         dataloader_num_workers=config.dataloader_num_workers,
         dataloader_pin_memory=False,
-        dataloader_prefetch_factor=config.dataloader_prefetch_factor,
+        dataloader_prefetch_factor=None,
         dataloader_persistent_workers=config.dataloader_num_workers > 0,
         optim="adamw_torch",
         adam_beta1=0.95,
