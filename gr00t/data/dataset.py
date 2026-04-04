@@ -28,6 +28,7 @@ import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
+import random
 from typing import Sequence
 
 import numpy as np
@@ -1310,3 +1311,38 @@ class LeRobotMixtureDataset(Dataset):
             )
         for dataset in self.datasets:
             dataset.set_transforms_metadata(self.merged_metadata[dataset.tag])
+
+
+class TCLTripletDataset(Dataset):
+
+    def __init__(self, base_dataset: LeRobotSingleDataset, min_temporal_distance: int = 5) -> None:
+        self.base = base_dataset
+        self.min_dist = min_temporal_distance
+
+        self.traj_to_steps: dict[int, list[int]] = defaultdict(list)
+        for traj_id, base_idx in base_dataset.all_steps:
+            self.traj_to_steps[traj_id].append(base_idx)
+
+    def __len__(self):
+        return len(self.base.all_steps)
+
+    def __getitem__(self, index):
+        traj_id, base_idx = self.base.all_steps[index]
+
+        # Anchor: raw obs at (traj_id, base_idx)
+        anchor_raw = self.base.get_step_data(traj_id, base_idx)
+
+        # Hard negative: different timestep in same trajectory, at least min_dist away
+        candidate_steps = self.traj_to_steps[traj_id]
+        valid = [s for s in candidate_steps if abs(s - base_idx) >= self.min_dist]
+        if not valid:
+            raise Exception("No valid negative found!")
+
+        neg_idx = random.choice(valid)
+        neg_raw = self.base.get_step_data(traj_id, neg_idx)
+        
+        return {
+            "anchor_raw": anchor_raw,
+            "negative_raw": neg_raw
+        }
+    
