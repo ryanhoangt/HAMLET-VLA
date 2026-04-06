@@ -67,7 +67,7 @@ sleep 20
 # 2. Run evaluation
 # -----------------------------
 echo "Running evaluation..."
-export MUJOCO_GL=egl
+export MUJOCO_GL=osmesa
 export QT_QPA_PLATFORM=offscreen
 cd examples/Libero/eval/
 
