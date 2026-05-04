@@ -14,10 +14,11 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 import tree
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import HFValidationError, RepositoryNotFoundError
@@ -29,6 +30,7 @@ from .action_head.flow_matching_action_head import (
     FlowmatchingActionHeadConfig,
 )
 from .backbone import EagleBackbone
+from .hamlet import MemoryModule
 
 BACKBONE_FEATURE_KEY = "backbone_features"
 ACTION_KEY = "action_pred"
@@ -85,6 +87,8 @@ class GR00T_N1_5(PreTrainedModel):
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
         self.compute_dtype = config.compute_dtype
+
+        self.hamlet_memory: Optional[MemoryModule] = None  # attached via attach_hamlet()
 
     def validate_inputs(self, inputs):
         # NOTE -- this should be handled internally by the model
@@ -158,12 +162,42 @@ class GR00T_N1_5(PreTrainedModel):
             error_msg += f"\n{self.action_dim=}"
             raise ValueError(error_msg)
 
+    def _apply_hamlet_memory(
+        self,
+        backbone_outputs: BatchFeature,
+        moment_history: Optional[torch.Tensor],
+    ) -> BatchFeature:
+        """Concatenate memory context to backbone_features if HAMLET is active.
+
+        Args:
+            backbone_outputs: output from backbone, contains backbone_features (B, N, d)
+            moment_history:   (B, T, n_m, d) — T stacked moment token features;
+                              the current timestep's features should be the last entry.
+        Returns:
+            backbone_outputs with backbone_features replaced by (B, N+n_m, d)
+        """
+        if self.hamlet_memory is None or moment_history is None:
+            return backbone_outputs
+
+        m_tilde = self.hamlet_memory(moment_history)  # (B, n_m, d)
+        feats = backbone_outputs[BACKBONE_FEATURE_KEY]  # (B, N, d)
+        backbone_outputs[BACKBONE_FEATURE_KEY] = torch.cat([feats, m_tilde], dim=1)
+        return backbone_outputs
+
     def forward(
         self,
         inputs: dict,
+        moment_history: Optional[torch.Tensor] = None,
     ) -> BatchFeature:
+        """
+        Args:
+            inputs:         standard GR00T input dict
+            moment_history: (B, T, n_m, d) stacked moment token features for HAMLET.
+                            None → standard forward (no memory).
+        """
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
+        backbone_outputs = self._apply_hamlet_memory(backbone_outputs, moment_history)
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
@@ -171,10 +205,17 @@ class GR00T_N1_5(PreTrainedModel):
     def get_action(
         self,
         inputs: dict,
+        moment_history: Optional[torch.Tensor] = None,
     ) -> BatchFeature:
+        """
+        Args:
+            inputs:         standard GR00T input dict
+            moment_history: (B, T, n_m, d) stacked moment token features for HAMLET.
+                            None → standard inference (no memory).
+        """
         backbone_inputs, action_inputs = self.prepare_input(inputs)
-        # Because the behavior of backbones remains the same for training and inference, we can use `forward` for backbones.
         backbone_outputs = self.backbone(backbone_inputs)
+        backbone_outputs = self._apply_hamlet_memory(backbone_outputs, moment_history)
         action_head_outputs = self.action_head.get_action(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
         return action_head_outputs
@@ -195,6 +236,61 @@ class GR00T_N1_5(PreTrainedModel):
         backbone_inputs = tree.map_structure(to_device_with_maybe_dtype, backbone_inputs)
         action_inputs = tree.map_structure(to_device_with_maybe_dtype, action_inputs)
         return backbone_inputs, action_inputs
+
+    def attach_hamlet(
+        self,
+        num_moment_tokens: int = 4,
+        d_model: int = 1536,
+        n_heads: int = 8,
+        n_layers: int = 2,
+        max_history: int = 4,
+        dropout: float = 0.1,
+    ) -> None:
+        """Attach HAMLET moment tokens + memory module to a loaded GR00T model.
+
+        Call this after from_pretrained().  The backbone's moment_tokens are
+        initialised randomly here; use load_moment_tokens() to load
+        TCL-pretrained weights on top.
+
+        Args:
+            num_moment_tokens: n_m — number of learnable moment tokens
+            d_model:           dimension of moment token features (= project_to_dim)
+            n_heads:           attention heads in the memory transformer
+            n_layers:          number of transformer layers in memory module
+            max_history:       maximum history length T
+            dropout:           dropout rate in memory transformer
+        """
+        # Attach moment tokens to backbone
+        self.backbone.num_moment_tokens = num_moment_tokens
+        dtype = next(self.backbone.eagle_model.parameters()).dtype
+        self.backbone.moment_tokens = nn.Parameter(
+            (0.02 * torch.randn(num_moment_tokens, 2048)).to(dtype=dtype)
+        )
+
+        # Attach memory module
+        self.hamlet_memory = MemoryModule(
+            d_model=d_model,
+            n_moment_tokens=num_moment_tokens,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            max_history=max_history,
+            dropout=dropout,
+        ).to(device=self.device, dtype=dtype)
+
+        n_params = sum(p.numel() for p in self.hamlet_memory.parameters())
+        n_params += self.backbone.moment_tokens.numel()
+        print(
+            f"HAMLET attached: {n_params:,} new params  "
+            f"(moment_tokens={num_moment_tokens * 2048:,}  memory={n_params - num_moment_tokens * 2048:,})"
+        )
+
+    def load_moment_tokens(self, tcl_checkpoint_path: str) -> None:
+        """Load TCL-pretrained moment_tokens from a checkpoint saved by pretrain_moment_tokens.py."""
+        ckpt = torch.load(tcl_checkpoint_path, map_location="cpu")
+        self.backbone.moment_tokens.data.copy_(
+            ckpt["moment_tokens"].to(dtype=self.backbone.moment_tokens.dtype)
+        )
+        print(f"Loaded moment_tokens from {tcl_checkpoint_path}  (step {ckpt.get('step', '?')})")
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs):

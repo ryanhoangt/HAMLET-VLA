@@ -24,10 +24,10 @@ class MemoryModule(nn.Module):
     def __init__(
         self,
         d_model: int = 1536,
-        n_moment_tokens: int = 16,
+        n_moment_tokens: int = 4,
         n_heads: int = 8,
         n_layers: int = 2,
-        max_history: int = 16,
+        max_history: int = 4,
         dropout: float = 0.1,
     ):
         super().__init__()

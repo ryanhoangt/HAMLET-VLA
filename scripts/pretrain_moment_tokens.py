@@ -100,7 +100,7 @@ class TCLArgs:
     base_model_path: str = "nvidia/GR00T-N1.5-3B"
     """HuggingFace hub ID or local path for the pretrained GR00T checkpoint."""
 
-    num_moment_tokens: int = 16
+    num_moment_tokens: int = 4
     """Number of learnable moment tokens n_m to inject into the VLM sequence."""
 
     proj_dim: int = 128
@@ -229,8 +229,9 @@ def main(args: TCLArgs) -> None:
 
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_trainable += sum(p.numel() for p in proj_head.parameters())
+    mt_numel = model.backbone.moment_tokens.numel()
     print(f"Trainable parameters: {n_trainable:,}  "
-          f"(moment_tokens={args.num_moment_tokens * 2048:,}  proj_head={sum(p.numel() for p in proj_head.parameters()):,})")
+          f"(moment_tokens={mt_numel:,}  proj_head={sum(p.numel() for p in proj_head.parameters()):,})")
 
     # ------------------------------------------------------------------
     # W&B
