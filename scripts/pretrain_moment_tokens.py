@@ -13,9 +13,10 @@ Usage:
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -129,6 +130,13 @@ class TCLArgs:
     save_every: int = 1000
     num_workers: int = 4
 
+    # --- Logging ---
+    wandb_project: Optional[str] = None
+    """W&B project name. Set to enable W&B logging (e.g. 'hamlet-tcl'). None = disabled."""
+
+    wandb_run_name: Optional[str] = None
+    """W&B run name. Auto-generated if None."""
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -225,11 +233,26 @@ def main(args: TCLArgs) -> None:
           f"(moment_tokens={args.num_moment_tokens * 2048:,}  proj_head={sum(p.numel() for p in proj_head.parameters()):,})")
 
     # ------------------------------------------------------------------
+    # W&B
+    # ------------------------------------------------------------------
+    use_wandb = args.wandb_project is not None
+    if use_wandb:
+        import wandb
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=vars(args),
+        )
+        print(f"W&B logging enabled → project: {args.wandb_project}")
+
+    # ------------------------------------------------------------------
     # 5. Training loop
     # ------------------------------------------------------------------
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     loader_iter = iter(loader)
     running_loss = 0.0
+    running_sim_pos = 0.0
+    running_sim_neg = 0.0
 
     for step in range(1, args.num_steps + 1):
         # Replenish iterator when exhausted
@@ -271,17 +294,43 @@ def main(args: TCLArgs) -> None:
         optimizer.step()
 
         running_loss += loss.item()
+        with torch.no_grad():
+            running_sim_pos += (z_a * z_p).sum(dim=-1).mean().item()
+            running_sim_neg += (z_a * z_n).sum(dim=-1).mean().item()
 
         if step % args.log_every == 0:
-            avg = running_loss / args.log_every
-            print(f"[step {step:>6}/{args.num_steps}]  TCL loss = {avg:.4f}")
+            avg_loss = running_loss / args.log_every
+            avg_sim_pos = running_sim_pos / args.log_every
+            avg_sim_neg = running_sim_neg / args.log_every
+            mt_grad_norm = model.backbone.moment_tokens.grad.norm().item() \
+                if model.backbone.moment_tokens.grad is not None else 0.0
+            print(
+                f"[step {step:>6}/{args.num_steps}]  loss={avg_loss:.4f}  "
+                f"sim_pos={avg_sim_pos:.3f}  sim_neg={avg_sim_neg:.3f}  "
+                f"mt_grad_norm={mt_grad_norm:.4f}"
+            )
+            if use_wandb:
+                import wandb
+                wandb.log({
+                    "loss": avg_loss,
+                    "sim_pos": avg_sim_pos,
+                    "sim_neg": avg_sim_neg,
+                    "sim_margin": avg_sim_pos - avg_sim_neg,
+                    "moment_token_grad_norm": mt_grad_norm,
+                    "moment_token_norm": model.backbone.moment_tokens.data.norm().item(),
+                }, step=step)
             running_loss = 0.0
+            running_sim_pos = 0.0
+            running_sim_neg = 0.0
 
         if step % args.save_every == 0:
             save_checkpoint(model, proj_head, args.output_dir, step)
 
     # Final save
     save_checkpoint(model, proj_head, args.output_dir, args.num_steps)
+    if use_wandb:
+        import wandb
+        wandb.finish()
     print("TCL pretraining complete.")
     print(f"Load moment_tokens for HAMLET training with:")
     print(f"  ckpt = torch.load('{args.output_dir}/tcl_latest.pt')")
