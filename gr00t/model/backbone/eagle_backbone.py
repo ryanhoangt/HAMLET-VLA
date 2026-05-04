@@ -38,6 +38,7 @@ class EagleBackbone(nn.Module):
         load_bf16: bool = False,
         eagle_path: str | None = None,
         project_to_dim: int = 1536,
+        num_moment_tokens: int = 0,
     ):
         """
         Args:
@@ -60,6 +61,12 @@ class EagleBackbone(nn.Module):
             self.eagle_model.language_model.model.layers.pop(-1)
 
         self.select_layer = select_layer
+        self.num_moment_tokens = num_moment_tokens
+        if num_moment_tokens > 0:
+            # Use LLM's native embedding space (2048-d for Eagle)
+            # 0.02 following Xavier/He initialization
+            self.moment_tokens = nn.Parameter(0.02 * torch.randn(num_moment_tokens, 2048))
+
         self.set_trainable_parameters(tune_llm, tune_visual)
 
     def set_trainable_parameters(self, tune_llm: bool, tune_visual: bool):
@@ -112,10 +119,84 @@ class EagleBackbone(nn.Module):
         eagle_features = self.eagle_linear(eagle_features)
         return eagle_features, eagle_input["attention_mask"]
 
+    def forward_eagle_with_moments(self, vl_input: BatchFeature):
+        """Inject moment tokens into the Eagle LLM sequence and return both h_t and m'_t.
+
+        Replicates Eagle2_5_VL.forward()'s embedding assembly (modeling_eagle2_5_vl.py:235-259),
+        then appends moment_tokens before calling the truncated language model directly.
+
+        Returns:
+            h_t:       (B, N, project_to_dim)  — standard VLM token features
+            m_t_prime: (B, n_m, project_to_dim) — contextualized moment token features
+            attn_mask: (B, N)                   — original attention mask for h_t
+        """
+        eagle_prefix = "eagle_"
+        eagle_input = {
+            k.removeprefix(eagle_prefix): v
+            for k, v in vl_input.items()
+            if k.startswith(eagle_prefix)
+        }
+
+        input_ids = eagle_input["input_ids"]
+        attention_mask = eagle_input["attention_mask"]
+        pixel_values = eagle_input["pixel_values"]
+        image_flags = eagle_input.get("image_flags")
+
+        # --- Step 1: extract vision features (mirrors extract_feature + image_flags filter) ---
+        vit_embeds = self.eagle_model.extract_feature(pixel_values)
+        if image_flags is not None:
+            vit_embeds = vit_embeds[image_flags.view(-1) == 1]
+
+        # --- Step 2: text embeddings + vision splice (mirrors Eagle forward lines 235-259) ---
+        input_embeds = self.eagle_model.language_model.get_input_embeddings()(input_ids)
+        B, N, C = input_embeds.shape
+        flat_embeds = input_embeds.reshape(B * N, C)
+        flat_ids = input_ids.reshape(B * N)
+        selected = flat_ids == self.eagle_model.image_token_index
+        try:
+            flat_embeds[selected] = flat_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
+        except Exception:
+            n_tok = selected.sum()
+            flat_embeds[selected] = (
+                flat_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)[:n_tok]
+            )
+        input_embeds = flat_embeds.reshape(B, N, C)
+
+        # --- Step 3: append moment tokens ---
+        mt = self.moment_tokens.to(dtype=input_embeds.dtype).unsqueeze(0).expand(B, -1, -1)
+        extended_embeds = torch.cat([input_embeds, mt], dim=1)  # (B, N+n_m, C)
+        mt_mask = torch.ones(
+            B, self.num_moment_tokens, dtype=attention_mask.dtype, device=attention_mask.device
+        )
+        extended_mask = torch.cat([attention_mask, mt_mask], dim=1)  # (B, N+n_m)
+
+        # --- Step 4: run truncated LM (no lm_head needed, use .model directly) ---
+        lm_out = self.eagle_model.language_model.model(
+            inputs_embeds=extended_embeds,
+            attention_mask=extended_mask,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        # select_layer is the last layer after truncation → hidden_states[select_layer] == [-1]
+        all_hidden = lm_out.hidden_states[self.select_layer]  # (B, N+n_m, C_lm)
+
+        # --- Step 5: split and project ---
+        h_raw = all_hidden[:, :N, :]    # (B, N, C_lm)
+        m_prime = all_hidden[:, N:, :]  # (B, n_m, C_lm)
+
+        h_t = self.eagle_linear(h_raw)           # (B, N, project_to_dim)
+        m_t_prime = self.eagle_linear(m_prime)   # (B, n_m, project_to_dim)
+
+        return h_t, m_t_prime, attention_mask
+
     def forward(self, vl_input: BatchFeature) -> BatchFeature:
         self.set_frozen_modules_to_eval_mode()
 
-        eagle_embeds, eagle_mask = self.forward_eagle(vl_input)
+        if self.num_moment_tokens > 0:
+            eagle_embeds, moment_features, eagle_mask = self.forward_eagle_with_moments(vl_input)
+        else:
+            eagle_embeds, eagle_mask = self.forward_eagle(vl_input)
+            moment_features = None
 
         # YL (TODO HACK): to resolve DDP issue when tune_visual=True
         # Ensure all trainable parameters in vision_model are used in the forward pass for DDP compatibility
@@ -128,6 +209,7 @@ class EagleBackbone(nn.Module):
                     dummy_term = dummy_term + 0.0 * param.sum()
             eagle_embeds = eagle_embeds + dummy_term
 
-        return BatchFeature(
-            data={"backbone_features": eagle_embeds, "backbone_attention_mask": eagle_mask}
-        )  # [B, T2, hidden_size]
+        data = {"backbone_features": eagle_embeds, "backbone_attention_mask": eagle_mask}
+        if moment_features is not None:
+            data["moment_features"] = moment_features
+        return BatchFeature(data=data)  # [B, T2, hidden_size]

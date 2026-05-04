@@ -1340,9 +1340,12 @@ class TCLTripletDataset(Dataset):
 
         neg_idx = random.choice(valid)
         neg_raw = self.base.get_step_data(traj_id, neg_idx)
-        
+
+        # Apply transforms twice to anchor_raw: each call re-samples random augmentation
+        # parameters (crop scale, color jitter), giving two distinct views of the same frame
         return {
-            "anchor_raw": anchor_raw,
-            "negative_raw": neg_raw
+            "anchor": self.base.transforms(anchor_raw),
+            "positive": self.base.transforms(anchor_raw),
+            "negative": self.base.transforms(neg_raw),
         }
     
