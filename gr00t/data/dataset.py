@@ -1320,17 +1320,17 @@ class TCLTripletDataset(Dataset):
         self.min_dist = min_temporal_distance
 
         self.traj_to_steps: dict[int, list[int]] = defaultdict(list)
-        for traj_id, base_idx in base_dataset.all_steps:
+        # Reverse map: (traj_id, step_idx) → integer index into all_steps
+        self._step_to_index: dict[tuple, int] = {}
+        for i, (traj_id, base_idx) in enumerate(base_dataset.all_steps):
             self.traj_to_steps[traj_id].append(base_idx)
+            self._step_to_index[(traj_id, base_idx)] = i
 
     def __len__(self):
         return len(self.base.all_steps)
 
     def __getitem__(self, index):
         traj_id, base_idx = self.base.all_steps[index]
-
-        # Anchor: raw obs at (traj_id, base_idx)
-        anchor_raw = self.base.get_step_data(traj_id, base_idx)
 
         # Hard negative: different timestep in same trajectory, at least min_dist away
         candidate_steps = self.traj_to_steps[traj_id]
@@ -1339,13 +1339,14 @@ class TCLTripletDataset(Dataset):
             raise Exception("No valid negative found!")
 
         neg_idx = random.choice(valid)
-        neg_raw = self.base.get_step_data(traj_id, neg_idx)
+        neg_index = self._step_to_index[(traj_id, neg_idx)]
 
-        # Apply transforms twice to anchor_raw: each call re-samples random augmentation
-        # parameters (crop scale, color jitter), giving two distinct views of the same frame
+        # Call base[index] twice: each invocation runs the full transform pipeline
+        # with independently sampled random augmentation params (crop, jitter, etc.)
+        # giving two distinct views of the same frame for anchor/positive.
         return {
-            "anchor": self.base.transforms(anchor_raw),
-            "positive": self.base.transforms(anchor_raw),
-            "negative": self.base.transforms(neg_raw),
+            "anchor": self.base[index],
+            "positive": self.base[index],
+            "negative": self.base[neg_index],
         }
     
