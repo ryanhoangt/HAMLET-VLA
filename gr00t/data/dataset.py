@@ -1349,4 +1349,69 @@ class TCLTripletDataset(Dataset):
             "positive": self.base[index],
             "negative": self.base[neg_index],
         }
-    
+
+
+class LeRobotHistoryDataset(Dataset):
+    """Wraps LeRobotSingleDataset to return T consecutive frames per sample.
+
+    For each sample at timestep t, returns a window of T frames:
+        [obs_{t-(T-1)*stride}, ..., obs_{t-stride}, obs_t]
+    where frames are clamped to the trajectory start for cold-start handling
+    (the earliest available frame is repeated instead of zero-padding).
+
+    Used by the HAMLET finetuning training loop, which:
+      - runs backbone under torch.no_grad() on frames[:-1] (historical)
+      - runs backbone with gradients on frames[-1] (current)
+      - stacks all T moment_features into moment_history for the MemoryModule
+
+    Args:
+        base_dataset:  a fully-initialised LeRobotSingleDataset (with transforms)
+        history_len:   T — total frames per sample including current (default: 4)
+        stride:        frames between history entries; use the action chunk size k
+                       at inference time (default: 1 for dense training supervision)
+    """
+
+    def __init__(
+        self,
+        base_dataset: LeRobotSingleDataset,
+        history_len: int = 4,
+        stride: int = 1,
+    ) -> None:
+        self.base = base_dataset
+        self.history_len = history_len
+        self.stride = stride
+
+        # Per-trajectory sorted step lists and reverse index
+        self._traj_steps: dict[int, list[int]] = defaultdict(list)
+        self._step_to_index: dict[tuple, int] = {}
+        for i, (traj_id, base_idx) in enumerate(base_dataset.all_steps):
+            self._traj_steps[traj_id].append(base_idx)
+            self._step_to_index[(traj_id, base_idx)] = i
+        for traj_id in self._traj_steps:
+            self._traj_steps[traj_id].sort()
+
+    def __len__(self) -> int:
+        return len(self.base.all_steps)
+
+    def __getitem__(self, index: int) -> dict:
+        traj_id, base_idx = self.base.all_steps[index]
+        sorted_steps = self._traj_steps[traj_id]
+
+        # Position of base_idx within this trajectory's sorted step list
+        pos = sorted_steps.index(base_idx)
+
+        # Walk back (T-1) entries with the given stride; clamp to start
+        history_positions = [
+            max(0, pos - (self.history_len - 1 - i) * self.stride)
+            for i in range(self.history_len)
+        ]
+        history_indices = [
+            self._step_to_index[(traj_id, sorted_steps[p])]
+            for p in history_positions
+        ]
+
+        # frames[0] = oldest, frames[-1] = current (same as self.base[index])
+        # The training loop should run backbone with no_grad on frames[:-1]
+        # and with gradients on frames[-1].
+        frames = [self.base[idx] for idx in history_indices]
+        return {"frames": frames}
