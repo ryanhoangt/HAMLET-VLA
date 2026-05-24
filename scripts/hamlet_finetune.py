@@ -164,9 +164,6 @@ class HAMLETArgs:
     num_moment_tokens: int = 4
     """n_m — moment tokens injected into the VLM sequence (paper default: 4)."""
 
-    d_model: int = 1536
-    """Moment token feature dimension (= backbone project_to_dim, paper default: 1536)."""
-
     n_heads: int = 8
     """Attention heads in the memory transformer."""
 
@@ -308,7 +305,7 @@ def main(args: HAMLETArgs) -> None:
     # Attach HAMLET components
     model.attach_hamlet(
         num_moment_tokens=args.num_moment_tokens,
-        d_model=args.d_model,
+        # d_model auto-detected from backbone eagle_linear output dimension
         n_heads=args.n_heads,
         n_layers=args.n_layers,
         max_history=args.max_history,
@@ -403,29 +400,32 @@ def main(args: HAMLETArgs) -> None:
         frames = batch["frames"]  # list of T collated dicts
         T = len(frames)
 
-        # --- Historical backbone passes: no gradient needed ---
-        # moment_features detached — memory module and moment_tokens still train
-        # via the current-frame pass below.
-        moment_features_list = []
-        with torch.no_grad():
-            for t in range(T - 1):
-                bb_in, _ = model.prepare_input(frames[t])
-                bb_out = model.backbone(bb_in)
-                moment_features_list.append(bb_out["moment_features"])
+        # torch.autocast ensures consistent bfloat16 computation across backbone,
+        # MemoryModule, and action head — same as HuggingFace Trainer's bf16=True.
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            # --- Historical backbone passes: no gradient needed ---
+            moment_features_list = []
+            with torch.no_grad():
+                for t in range(T - 1):
+                    bb_in, _ = model.prepare_input(frames[t])
+                    bb_out = model.backbone(bb_in)
+                    moment_features_list.append(bb_out["moment_features"])
 
-        # --- Current frame: full gradient graph ---
-        bb_in_curr, act_in_curr = model.prepare_input(frames[-1])
-        bb_out_curr = model.backbone(bb_in_curr)
-        moment_features_list.append(bb_out_curr["moment_features"])
+            # --- Current frame: full gradient graph ---
+            bb_in_curr, act_in_curr = model.prepare_input(frames[-1])
+            bb_out_curr = model.backbone(bb_in_curr)
+            moment_features_list.append(bb_out_curr["moment_features"])
 
-        # moment_history: (B, T, n_m, d_model)
-        moment_history = torch.stack(moment_features_list, dim=1)
+            # moment_history: (B, T, n_m, d_model)
+            moment_history = torch.stack(moment_features_list, dim=1)
 
-        # MemoryModule: produces m̃'_t (B, n_m, d) → concat to backbone_features
-        bb_out_curr = model._apply_hamlet_memory(bb_out_curr, moment_history)
+            # MemoryModule: produces m̃'_t (B, n_m, d) → concat to backbone_features
+            bb_out_curr = model._apply_hamlet_memory(bb_out_curr, moment_history)
 
-        action_out = model.action_head(bb_out_curr, act_in_curr)
-        loss = action_out["loss"] / args.gradient_accumulation_steps
+            action_out = model.action_head(bb_out_curr, act_in_curr)
+            loss = action_out["loss"] / args.gradient_accumulation_steps
+
+        # backward outside autocast — safe for bfloat16 (no GradScaler needed)
         loss.backward()
 
         running_loss += loss.item() * args.gradient_accumulation_steps

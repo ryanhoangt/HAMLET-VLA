@@ -240,7 +240,7 @@ class GR00T_N1_5(PreTrainedModel):
     def attach_hamlet(
         self,
         num_moment_tokens: int = 4,
-        d_model: int = 1536,
+        d_model: Optional[int] = None,
         n_heads: int = 8,
         n_layers: int = 2,
         max_history: int = 4,
@@ -254,12 +254,18 @@ class GR00T_N1_5(PreTrainedModel):
 
         Args:
             num_moment_tokens: n_m — number of learnable moment tokens
-            d_model:           dimension of moment token features (= project_to_dim)
+            d_model:           dimension of moment token features after eagle_linear.
+                               Auto-detected from backbone if None (recommended).
             n_heads:           attention heads in the memory transformer
             n_layers:          number of transformer layers in memory module
             max_history:       maximum history length T
             dropout:           dropout rate in memory transformer
         """
+        # Auto-detect feature dimension from eagle_linear output
+        if d_model is None:
+            d_model = int(getattr(self.backbone.eagle_linear, "out_features", 2048))
+        print(f"HAMLET d_model: {d_model} (eagle_linear output dim)")
+
         # Attach moment tokens to backbone
         self.backbone.num_moment_tokens = num_moment_tokens
         dtype = next(self.backbone.eagle_model.parameters()).dtype
