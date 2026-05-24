@@ -25,7 +25,7 @@ import sys
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -130,8 +130,8 @@ def _lr_lambda(step: int, warmup_steps: int, max_steps: int) -> float:
 @dataclass
 class HAMLETArgs:
     # --- Data ---
-    dataset_path: str
-    """Path to the LeRobot-format dataset directory."""
+    dataset_path: List[str]
+    """One or more LeRobot-format dataset directories.  Multiple paths are concatenated."""
 
     data_config: str = "so100"
     """Data config name (e.g. 'so100', 'fourier_gr1_arms_only').  Must match the dataset."""
@@ -233,21 +233,30 @@ def main(args: HAMLETArgs) -> None:
     transforms = data_cfg.transform()
     embodiment_tag = EmbodimentTag(args.embodiment_tag)
 
-    base_dataset = LeRobotSingleDataset(
-        dataset_path=args.dataset_path,
-        modality_configs=modality_configs,
-        transforms=transforms,
-        embodiment_tag=embodiment_tag,
-        video_backend=args.video_backend,
-    )
+    history_datasets = []
+    for path in args.dataset_path:
+        base = LeRobotSingleDataset(
+            dataset_path=path,
+            modality_configs=modality_configs,
+            transforms=transforms,
+            embodiment_tag=embodiment_tag,
+            video_backend=args.video_backend,
+        )
+        history_datasets.append(
+            LeRobotHistoryDataset(
+                base_dataset=base,
+                history_len=args.history_len,
+                stride=args.history_stride,
+            )
+        )
 
-    history_dataset = LeRobotHistoryDataset(
-        base_dataset=base_dataset,
-        history_len=args.history_len,
-        stride=args.history_stride,
+    history_dataset = (
+        history_datasets[0]
+        if len(history_datasets) == 1
+        else torch.utils.data.ConcatDataset(history_datasets)
     )
     print(
-        f"Dataset: {len(history_dataset)} samples  "
+        f"Dataset: {len(history_dataset)} samples across {len(args.dataset_path)} path(s)  "
         f"(history_len={args.history_len}, stride={args.history_stride})"
     )
 

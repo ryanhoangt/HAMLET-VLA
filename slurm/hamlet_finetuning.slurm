@@ -39,7 +39,10 @@ export TMPDIR=/home/vhoangth2/pytorch_tmp
 #      and save a checkpoint, then pass that checkpoint as --base_model_path
 #   3. Run this script with --tcl_checkpoint pointing to tcl_latest.pt
 python scripts/hamlet_finetune.py \
-    --dataset_path /mnt/data/vhoangth2/hf_cache/lerobot/IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot \
+    --dataset_path \
+        /mnt/data/vhoangth2/hf_cache/lerobot/IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot \
+        /mnt/data/vhoangth2/hf_cache/lerobot/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot \
+        /mnt/data/vhoangth2/hf_cache/lerobot/IPEC-COMMUNITY/libero_10_no_noops_1.0.0_lerobot \
     --data_config "examples.Libero.custom_data_config:LiberoDataConfig" \
     --base_model_path nvidia/GR00T-N1.5-3B \
     --tcl_checkpoint /mnt/data/vhoangth2/checkpoints/tcl_latest.pt \
