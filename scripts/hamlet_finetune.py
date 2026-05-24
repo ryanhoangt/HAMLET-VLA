@@ -186,23 +186,20 @@ class HAMLETArgs:
     output_dir: str = "/tmp/hamlet"
     """Directory to write checkpoints."""
 
-    batch_size: int = 8
-    """Per-GPU batch size.  Each sample triggers T backbone passes."""
+    batch_size: int = 32
+    """Per-GPU batch size.  Each sample triggers T backbone passes (paper: 32)."""
 
-    max_steps: int = 10000
+    max_steps: int = 60000
     num_gpus: int = 1
-    save_steps: int = 1000
+    save_steps: int = 5000
     log_every: int = 10
 
-    learning_rate: float = 1e-4
-    """Base LR for action head and backbone eagle_linear."""
-
-    hamlet_lr: float = 1e-4
-    """LR for moment_tokens and MemoryModule.
-    Raise to 1e-3 if using randomly initialised tokens."""
+    learning_rate: float = 1e-5
+    """LR for MemoryModule and action head (paper: 1e-5)."""
 
     weight_decay: float = 1e-5
-    warmup_steps: int = 500
+    warmup_steps: int = 3000
+    """Linear warmup steps (paper follows gr00t_finetune default warmup_ratio=0.05; 0.05 * 60k = 3k)."""
     gradient_accumulation_steps: int = 1
     num_workers: int = 8
     prefetch_factor: int = 2
@@ -323,19 +320,15 @@ def main(args: HAMLETArgs) -> None:
     # ------------------------------------------------------------------
     # 3. Optimizer  (two param groups for separate LRs)
     # ------------------------------------------------------------------
-    hamlet_params = (
-        list(model.hamlet_memory.parameters()) + [model.backbone.moment_tokens]
-    )
-    action_params = (
-        list(model.action_head.parameters())
-        + list(model.backbone.eagle_linear.parameters())
-    )
+    # Paper: "VLM and moment tokens are kept frozen" during fine-tuning.
+    # Only MemoryModule + action head are trained.
+    model.backbone.moment_tokens.requires_grad_(False)
+    for p in model.backbone.eagle_linear.parameters():
+        p.requires_grad_(False)
 
     optimizer = torch.optim.AdamW(
-        [
-            {"params": hamlet_params, "lr": args.hamlet_lr},
-            {"params": action_params, "lr": args.learning_rate},
-        ],
+        list(model.hamlet_memory.parameters()) + list(model.action_head.parameters()),
+        lr=args.learning_rate,
         weight_decay=args.weight_decay,
         betas=(0.95, 0.999),
         eps=1e-8,
@@ -353,13 +346,12 @@ def main(args: HAMLETArgs) -> None:
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(
         f"Trainable parameters: {n_trainable:,}  "
-        f"(moment_tokens={model.backbone.moment_tokens.numel():,}  "
-        f"memory={sum(p.numel() for p in model.hamlet_memory.parameters()):,}  "
+        f"(memory={sum(p.numel() for p in model.hamlet_memory.parameters()):,}  "
         f"action_head={sum(p.numel() for p in model.action_head.parameters()):,})"
     )
 
     # Collect all trainable params for grad clipping
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    trainable_params = list(model.hamlet_memory.parameters()) + list(model.action_head.parameters())
 
     # ------------------------------------------------------------------
     # 4. Resume if requested

@@ -110,16 +110,14 @@ class TCLArgs:
     output_dir: str = "/tmp/tcl_hamlet"
     """Directory to write checkpoints."""
 
-    batch_size: int = 8
-    """Per-GPU batch size.  Each item produces 3 backbone passes (anchor/pos/neg)."""
+    batch_size: int = 64
+    """Per-GPU batch size.  Each item produces 3 backbone passes (anchor/pos/neg) (paper: 64)."""
 
-    num_steps: int = 5000
-    """Total gradient update steps."""
+    num_steps: int = 30000
+    """Total gradient update steps (paper: up to 30k)."""
 
-    lr: float = 1e-3
-    """Learning rate for moment_tokens + projection head.
-    Higher than normal VLA fine-tuning because moment_tokens start from random init
-    and gradients must propagate through many frozen LLM layers."""
+    lr: float = 1e-5
+    """Learning rate for moment_tokens + projection head (paper: 1e-5)."""
 
     weight_decay: float = 1e-4
 
