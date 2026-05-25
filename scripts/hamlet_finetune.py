@@ -264,7 +264,7 @@ def main(args: HAMLETArgs) -> None:
         drop_last=True,
         pin_memory=True,
         prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
-        persistent_workers=args.num_workers > 0,
+        persistent_workers=False,
     )
 
     # ------------------------------------------------------------------
@@ -377,17 +377,20 @@ def main(args: HAMLETArgs) -> None:
     # ------------------------------------------------------------------
     # 6. Training loop
     # ------------------------------------------------------------------
+    def _cycle(dataloader):
+        """Infinite iterator over a DataLoader — avoids re-creating iter() on
+        persistent-worker loaders, which can deadlock in some PyTorch versions."""
+        while True:
+            for batch in dataloader:
+                yield batch
+
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    loader_iter = iter(loader)
+    data_iter = _cycle(loader)
     running_loss = 0.0
     accum_step = 0
 
     for step in range(start_step + 1, args.max_steps + 1):
-        try:
-            batch = next(loader_iter)
-        except StopIteration:
-            loader_iter = iter(loader)
-            batch = next(loader_iter)
+        batch = next(data_iter)
 
         frames = batch["frames"]  # list of T collated dicts
         T = len(frames)
