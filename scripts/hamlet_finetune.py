@@ -211,6 +211,10 @@ class HAMLETArgs:
     wandb_run_name: Optional[str] = None
     """W&B run name.  Auto-generated if None."""
 
+    wandb_run_id: Optional[str] = None
+    """W&B run ID to resume (e.g. '36u2z7y3' from the run URL).
+    Use together with --resume_from to continue a specific W&B run."""
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -369,10 +373,12 @@ def main(args: HAMLETArgs) -> None:
         wandb.init(
             project=args.wandb_project,
             name=args.wandb_run_name,
+            id=args.wandb_run_id,
             config=vars(args),
-            resume="allow",
+            resume="must" if args.wandb_run_id else "allow",
         )
-        print(f"W&B logging enabled → project: {args.wandb_project}")
+        print(f"W&B logging enabled → project: {args.wandb_project}"
+              + (f"  run_id: {args.wandb_run_id}" if args.wandb_run_id else ""))
 
     # ------------------------------------------------------------------
     # 6. Training loop
