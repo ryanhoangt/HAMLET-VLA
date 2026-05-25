@@ -1315,39 +1315,53 @@ class LeRobotMixtureDataset(Dataset):
 
 class TCLTripletDataset(Dataset):
 
-    def __init__(self, base_dataset: LeRobotSingleDataset, min_temporal_distance: int = 5) -> None:
-        self.base = base_dataset
+    def __init__(
+        self,
+        base_dataset: "LeRobotSingleDataset | list[LeRobotSingleDataset]",
+        min_temporal_distance: int = 5,
+    ) -> None:
         self.min_dist = min_temporal_distance
 
-        self.traj_to_steps: dict[int, list[int]] = defaultdict(list)
-        # Reverse map: (traj_id, step_idx) → integer index into all_steps
-        self._step_to_index: dict[tuple, int] = {}
-        for i, (traj_id, base_idx) in enumerate(base_dataset.all_steps):
-            self.traj_to_steps[traj_id].append(base_idx)
-            self._step_to_index[(traj_id, base_idx)] = i
+        datasets = base_dataset if isinstance(base_dataset, list) else [base_dataset]
+        self._datasets = datasets
+
+        # Global step list: (ds_idx, base_idx) for dispatching __getitem__
+        self._all_steps: list[tuple[int, int]] = []
+        # Keyed by (ds_idx, traj_id) to avoid collisions across datasets
+        self.traj_to_steps: dict[tuple[int, int], list[int]] = defaultdict(list)
+        self._step_to_index: dict[tuple[int, int, int], int] = {}
+
+        for ds_idx, ds in enumerate(datasets):
+            for traj_id, base_idx in ds.all_steps:
+                global_i = len(self._all_steps)
+                self._all_steps.append((ds_idx, base_idx))
+                self.traj_to_steps[(ds_idx, traj_id)].append(base_idx)
+                self._step_to_index[(ds_idx, traj_id, base_idx)] = global_i
 
     def __len__(self):
-        return len(self.base.all_steps)
+        return len(self._all_steps)
 
     def __getitem__(self, index):
-        traj_id, base_idx = self.base.all_steps[index]
+        ds_idx, base_idx = self._all_steps[index]
+        ds = self._datasets[ds_idx]
+        traj_id, _ = ds.all_steps[base_idx]
 
         # Hard negative: different timestep in same trajectory, at least min_dist away
-        candidate_steps = self.traj_to_steps[traj_id]
+        candidate_steps = self.traj_to_steps[(ds_idx, traj_id)]
         valid = [s for s in candidate_steps if abs(s - base_idx) >= self.min_dist]
         if not valid:
             raise Exception("No valid negative found!")
 
-        neg_idx = random.choice(valid)
-        neg_index = self._step_to_index[(traj_id, neg_idx)]
+        neg_base_idx = random.choice(valid)
+        neg_index = self._step_to_index[(ds_idx, traj_id, neg_base_idx)]
 
         # Call base[index] twice: each invocation runs the full transform pipeline
         # with independently sampled random augmentation params (crop, jitter, etc.)
         # giving two distinct views of the same frame for anchor/positive.
         return {
-            "anchor": self.base[index],
-            "positive": self.base[index],
-            "negative": self.base[neg_index],
+            "anchor": ds[base_idx],
+            "positive": ds[base_idx],
+            "negative": self._datasets[self._all_steps[neg_index][0]][neg_base_idx],
         }
 
 

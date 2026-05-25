@@ -16,7 +16,7 @@ import os
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -84,8 +84,8 @@ def save_checkpoint(
 @dataclass
 class TCLArgs:
     # --- Data ---
-    dataset_path: str
-    """Path to the LeRobot-format dataset directory."""
+    dataset_path: List[str]
+    """Path(s) to LeRobot-format dataset directories. Pass multiple times for multi-dataset training."""
 
     data_config: str = "so100"
     """Data config name (e.g. 'so100', 'fourier_gr1_arms_only').  Must match the dataset."""
@@ -151,20 +151,25 @@ def main(args: TCLArgs) -> None:
     modality_config: dict[str, ModalityConfig] = data_cfg.modality_config()
     transform = data_cfg.transform()
 
-    base_dataset = LeRobotSingleDataset(
-        dataset_path=args.dataset_path,
-        modality_configs=modality_config,
-        embodiment_tag=args.embodiment_tag if args.embodiment_tag else data_cfg.embodiment_tag
-            if hasattr(data_cfg, "embodiment_tag") else "new_embodiment",
-        transforms=transform,
+    embodiment_tag = (
+        args.embodiment_tag if args.embodiment_tag
+        else getattr(data_cfg, "embodiment_tag", "new_embodiment")
     )
-    # Normalization stats are loaded from dataset metadata automatically above.
+    base_datasets = [
+        LeRobotSingleDataset(
+            dataset_path=p,
+            modality_configs=modality_config,
+            embodiment_tag=embodiment_tag,
+            transforms=transform,
+        )
+        for p in args.dataset_path
+    ]
 
     tcl_dataset = TCLTripletDataset(
-        base_dataset=base_dataset,
+        base_dataset=base_datasets,
         min_temporal_distance=args.min_temporal_distance,
     )
-    print(f"Dataset: {len(tcl_dataset)} triplet samples")
+    print(f"Loaded {len(base_datasets)} dataset(s), {len(tcl_dataset)} total triplet samples")
 
     eagle_processor = build_eagle_processor(DEFAULT_EAGLE_PATH)
     loader = torch.utils.data.DataLoader(

@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=libero_joint_finetuning_60k_baseline          # Job name shown in squeue/sacct. Keep it short and descriptive (e.g., train_resnet, eval_v1).
+#SBATCH --job-name=eval_gr00t_libero          # Job name shown in squeue/sacct. Keep it short and descriptive (e.g., train_resnet, eval_v1).
 
 #SBATCH --output=log_%j.out          # Stdout log file (normal prints). %j is replaced by the JOB_ID to avoid overwriting logs.
 
 #SBATCH --error=log_%j.err           # Stderr log file (errors/tracebacks). Separating stdout/stderr makes debugging easier.
 
-#SBATCH --time=72:00:00              # Max runtime (HH:MM:SS). When the limit is reached, Slurm will stop the job (TIMEOUT).
+#SBATCH --time=48:00:00              # Max runtime (HH:MM:SS). When the limit is reached, Slurm will stop the job (TIMEOUT).
                                      # Best practice: test with ~00:10:00 first before running long jobs.
                                      # so you may omit --time (or try --time=0) if you truly need “unlimited”.
                                      
@@ -45,7 +45,41 @@ export WANDB_DISABLE_SERVICE=true
 # export WANDB_MODE=offline
 # export WANDB_DISABLE_CODE=true
 
-export TMPDIR=/home/vhoangth2/pytorch_tmp
+# -----------------------------
+# 1. Start the inference server
+# -----------------------------
+python scripts/inference_service.py \
+  --model_path expdata/libero_joint_finetuning_60k_baseline/checkpoint-60000 \
+  --server \
+  --data_config examples.Libero.custom_data_config:LiberoDataConfig \
+  --denoising-steps 8 \
+  --embodiment-tag new_embodiment \
+  --host 0.0.0.0 \
+  2>&1 &
 
-# Train
-python scripts/gr00t_finetune.py --dataset-path /mnt/data/vhoangth2/hf_cache/lerobot/IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot /mnt/data/vhoangth2/hf_cache/lerobot/IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot /mnt/data/vhoangth2/hf_cache/lerobot/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot /mnt/data/vhoangth2/hf_cache/lerobot/IPEC-COMMUNITY/libero_10_no_noops_1.0.0_lerobot --data_config examples.Libero.custom_data_config:LiberoDataConfig --num-gpus 1 --save_steps 5000 --batch-size 128 --output-dir expdata/libero_joint_finetuning_60k_baseline --max-steps 60000 --dataloader_num_workers 8 --dataloader_prefetch_factor 2
+SERVER_PID=$!
+echo "Started server with PID $SERVER_PID"
+
+# Give the server a few seconds to start up
+sleep 20
+
+# -----------------------------
+# 2. Run evaluation
+# -----------------------------
+echo "Running evaluation..."
+export MUJOCO_GL=osmesa
+export QT_QPA_PLATFORM=offscreen
+cd examples/Libero/eval/
+
+PYTHONPATH=/mnt/data/vhoangth2/repos/LIBERO:$PYTHONPATH \
+python run_libero_eval.py \
+  --task_suite_name libero_spatial \
+  --headless --num_trials_per_task 20
+
+# -----------------------------
+# 3. Cleanup
+# -----------------------------
+echo "Stopping inference server..."
+kill $SERVER_PID || true
+
+echo "Done."

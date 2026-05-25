@@ -82,7 +82,7 @@ class GR00TPolicy:
         },
     }
 
-    def __init__(self, host="localhost", port=5555, headless=False):
+    def __init__(self, host="127.0.0.1", port=5555, headless=False):
         from gr00t.eval.service import ExternalRobotInferenceClient
 
         self.policy = ExternalRobotInferenceClient(host=host, port=port)
@@ -161,7 +161,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
         # Initialize LIBERO environment and task description
         env, task_description = get_libero_env(task, resolution=256)
 
-        gr00t_policy = GR00TPolicy(host="localhost", port=cfg.port, headless=cfg.headless)
+        gr00t_policy = GR00TPolicy(host="127.0.0.1", port=cfg.port, headless=cfg.headless)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
