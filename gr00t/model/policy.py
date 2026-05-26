@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import json
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -362,3 +363,125 @@ def squeeze_dict_values(data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             squeezed_data[k] = v
     return squeezed_data
+
+
+#######################################################################################################
+
+
+class HAMLETPolicy(Gr00tPolicy):
+    """GR00T + HAMLET memory module policy for evaluation.
+
+    Extends Gr00tPolicy with a rolling moment_history buffer.  Call reset()
+    at the start of each episode to clear the buffer.
+
+    Loading order:
+      1. Base GR00T model from base_model_path (also provides experiment_cfg metadata).
+      2. attach_hamlet() — adds moment_tokens + MemoryModule.
+      3. HAMLET .pt checkpoint — patches moment_tokens, hamlet_memory, action_head,
+         and backbone_eagle_linear with fine-tuned weights.
+    """
+
+    def __init__(
+        self,
+        base_model_path: str,
+        hamlet_checkpoint_path: str,
+        embodiment_tag: Union[str, EmbodimentTag],
+        modality_config: Dict[str, ModalityConfig],
+        modality_transform,
+        denoising_steps: Optional[int] = None,
+        device: Union[int, str] = "cuda" if torch.cuda.is_available() else "cpu",
+        num_moment_tokens: int = 4,
+        n_heads: int = 8,
+        n_layers: int = 2,
+        max_history: int = 4,
+        dropout: float = 0.1,
+    ):
+        # Store HAMLET-specific attrs before super().__init__ so _load_model() can use them
+        self._hamlet_checkpoint_path = hamlet_checkpoint_path
+        self._num_moment_tokens = num_moment_tokens
+        self._n_heads = n_heads
+        self._n_layers = n_layers
+        self._max_history = max_history
+        self._dropout = dropout
+        self._moment_history_buffer: collections.deque = collections.deque(maxlen=max_history)
+
+        super().__init__(
+            model_path=base_model_path,
+            embodiment_tag=embodiment_tag,
+            modality_config=modality_config,
+            modality_transform=modality_transform,
+            denoising_steps=denoising_steps,
+            device=device,
+        )
+
+    def reset(self) -> None:
+        """Clear moment history. Call at the start of each episode."""
+        self._moment_history_buffer.clear()
+
+    def _load_model(self, model_path: str) -> None:
+        model = GR00T_N1_5.from_pretrained(model_path, torch_dtype=COMPUTE_DTYPE)
+        model.eval()
+
+        # Match action horizon to modality config (same logic as Gr00tPolicy._load_model)
+        expected_action_horizon = len(self._modality_config["action"].delta_indices)
+        if expected_action_horizon != model.action_head.config.action_horizon:
+            print(
+                f"HAMLETPolicy: Recreating action head with "
+                f"action_horizon={expected_action_horizon} "
+                f"(was {model.action_head.config.action_horizon})"
+            )
+            from gr00t.model.action_head.flow_matching_action_head import FlowmatchingActionHead
+
+            new_cfg = model.action_head.config
+            new_cfg.action_horizon = expected_action_horizon
+            new_head = FlowmatchingActionHead(new_cfg)
+            new_head.load_state_dict(model.action_head.state_dict(), strict=False)
+            model.action_head = new_head
+            model.config.action_horizon = expected_action_horizon
+            model.action_horizon = expected_action_horizon
+            model.config.action_head_cfg["action_horizon"] = expected_action_horizon
+
+        # Attach HAMLET components (moment_tokens + MemoryModule)
+        model.attach_hamlet(
+            num_moment_tokens=self._num_moment_tokens,
+            n_heads=self._n_heads,
+            n_layers=self._n_layers,
+            max_history=self._max_history,
+            dropout=self._dropout,
+        )
+
+        # Load HAMLET checkpoint weights
+        ckpt = torch.load(self._hamlet_checkpoint_path, map_location="cpu")
+        dtype = model.backbone.moment_tokens.dtype
+        model.backbone.moment_tokens.data.copy_(ckpt["moment_tokens"].to(dtype=dtype))
+        model.hamlet_memory.load_state_dict(ckpt["hamlet_memory"])
+        model.action_head.load_state_dict(ckpt["action_head"])
+        if "backbone_eagle_linear" in ckpt:
+            model.backbone.eagle_linear.load_state_dict(ckpt["backbone_eagle_linear"])
+        print(
+            f"HAMLETPolicy: loaded checkpoint from {self._hamlet_checkpoint_path} "
+            f"(step {ckpt.get('step', '?')})"
+        )
+
+        model.to(device=self.device)
+        self.model = model
+
+    def _get_action_from_normalized_input(self, normalized_input: Dict[str, Any]) -> torch.Tensor:
+        with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=COMPUTE_DTYPE):
+            backbone_inputs, action_inputs = self.model.prepare_input(normalized_input)
+            backbone_outputs = self.model.backbone(backbone_inputs)
+
+            # Update rolling buffer with current frame's moment features
+            if "moment_features" in backbone_outputs:
+                self._moment_history_buffer.append(backbone_outputs["moment_features"])
+
+            # Build moment_history (1, T, n_m, d) from buffer — T grows until max_history
+            if self._moment_history_buffer:
+                moment_history = torch.stack(list(self._moment_history_buffer), dim=1)
+            else:
+                moment_history = None
+
+            backbone_outputs = self.model._apply_hamlet_memory(backbone_outputs, moment_history)
+            action_head_outputs = self.model.action_head.get_action(backbone_outputs, action_inputs)
+
+        return action_head_outputs["action_pred"].float()
